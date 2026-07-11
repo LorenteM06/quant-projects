@@ -1,52 +1,73 @@
 # SPY Volatility Surface Analysis with SVI Parametrization
 
-Full quantitative analysis of the SPY implied volatility surface using the Stochastic Volatility Inspired (SVI) parametrization introduced by Gatheral (2004).
+Quantitative analysis of the SPY implied volatility surface using the Stochastic Volatility Inspired (SVI) parametrization introduced by Gatheral (2004). The project constructs, calibrates and diagnoses the surface, then applies it to detect mispriced options in live market data, with cross-ticker comparison against QQQ.
 
 ## Overview
 
-This project constructs and analyses the implied volatility surface of SPY (S&P 500 ETF) using live option market data. For each of six selected expiries spanning from 1 week to 1 year, implied volatilities are extracted from market prices via Black-Scholes inversion, then fitted with the SVI parametric form. The resulting surface enables interpolation of arbitrary strike/maturity combinations and reveals structural properties of the market's volatility expectations.
+For six selected expiries spanning from 1 week to 1 year, implied volatilities are extracted from market prices via Black-Scholes inversion, then fitted with the SVI parametric form. The calibrated surface enables four concrete outputs:
+
+1. Term structure analysis of skew (ρ) and ATM volatility
+2. Rigorous butterfly-arbitrage diagnostics per maturity (Gatheral 2014)
+3. Automated detection of options trading far from the model, filtered by liquidity criteria
+4. Cross-ticker comparison against QQQ to contextualise structural differences
 
 ## Methodology
 
-**Data source.** Live option chain from Yahoo Finance via `yfinance`. Six maturities are selected to approximate 1w, 1m, 2m, 3m, 6m and 1y.
+**Data source.** Live option chain from Yahoo Finance via `yfinance`. Six maturities selected to approximate 1w, 1m, 2m, 3m, 6m and 1y.
 
-**Implied volatility extraction.** For each call option, Black-Scholes is inverted numerically using Brent's method to find the volatility that reproduces the observed market price.
+**Implied volatility extraction.** Black-Scholes is inverted numerically using Brent's method.
 
-**SVI fitting.** For each expiry, total variance w = σ²·T is fitted against log-moneyness k = ln(K/S) using the SVI parametric form:
+**SVI fitting.** For each expiry, total variance w = σ²·T is fitted against log-moneyness k = ln(K/S):
 
     w(k) = a + b · (ρ(k - m) + √((k - m)² + σ²))
 
-Five parameters (a, b, ρ, m, σ) are estimated by non-linear least squares minimisation with bounds.
+Parameters estimated by non-linear least squares with bounds.
 
-**Surface construction.** Individual SVI fits are combined into a continuous surface evaluated on a grid of log-moneyness and time to expiry.
+**Model diagnostics.** RMSE(IV) and butterfly-arbitrage check via Gatheral (2014) equation (2.2).
+
+**Mispricing detection.** Live quotes compared against SVI-implied volatilities. Signals filtered by volume (> 10) and bid-ask spread (< 5% of price).
+
+**Cross-ticker comparison.** Full pipeline applied to QQQ; ρ and ATM volatility compared across maturities.
 
 ## Key Findings
 
-- **Persistent negative skew across maturities.** The ρ parameter is systematically negative, confirming the well-known equity index volatility skew: out-of-the-money puts trade at higher implied volatilities than out-of-the-money calls.
+- **Persistent negative skew across all maturities** — OTM puts trade at higher implied volatilities than OTM calls.
+- **Skew flattens with maturity** — a well-documented stylised fact.
+- **Butterfly arbitrage detected at short maturities** — standard SVI produces g(k) < 0 for expiries under one month, consistent with Gatheral & Jacquier (2014).
+- **RMSE(IV) ranges from 0.7% to 1.5%** — comparable to production-grade calibration.
+- **Cross-ticker asymmetry** — QQQ exhibits higher ATM volatility (sector concentration in tech) while SPY shows more pronounced skew (systemic hedging demand from institutional flows).
+- **Actionable mispricing signals detected** — after liquidity filtering, small number of options trade materially outside the SVI curve, exported to `signals.csv`.
 
-- **Term structure of skew flattens with maturity.** Short-dated smiles (1-2 weeks) exhibit pronounced curvature that gradually flattens for longer expiries — a stylised fact widely documented in the volatility literature.
+## Limitations
 
-- **ATM volatility term structure is non-monotonic.** The at-the-money implied volatility rises through medium maturities but decreases at long horizons, consistent with either upcoming event risk or reduced liquidity in far-dated options.
+- **Snapshot analysis.** The pipeline captures the surface at a single point in time. Detected mispricings are not backtested — persistence and mean-reversion of signals require multi-day sampling.
+- **Standard SVI, not SSVI.** The classical parametrization violates butterfly arbitrage at short maturities. Production settings would use Surface SVI (SSVI) or Gatheral-Jacquier arbitrage-free formulations.
+- **Yahoo Finance data quality.** Bid-ask spreads and volumes are proxies for true liquidity; some quotes may be stale, particularly for far-OTM strikes.
+- **Constant risk-free rate.** A single r = 5% is used across all maturities. A proper implementation would use the treasury curve.
+- **No dividend adjustment.** SPY dividends are ignored; more accurate pricing would incorporate the projected dividend yield.
 
 ## Files
 
-- `iv_surface.py` — full pipeline (data download, IV extraction, SVI fitting, visualisation)
-- `smiles_all.png` — volatility smiles for all expiries with SVI fits overlaid
-- `iv_surface_3d.png` — full 3D implied volatility surface
-- `term_structure.png` — SVI ρ and ATM volatility as functions of maturity
+- `iv_surface.py` — full pipeline
+- `iv_surface_3d.png` — 3D implied volatility surface
+- `iv_heatmap.png` — 2D heatmap
+- `term_structure.png` — SVI ρ and ATM volatility vs maturity
+- `mispricings_map.png` — detected dislocations in (strike, time) space
+- `spy_vs_qqq.png` — cross-ticker comparison
+- `signals.csv` — quality-filtered mispricing signals
 
 ## How to Run
 
 ```bash
-pip install numpy scipy matplotlib yfinance
+pip install numpy scipy matplotlib yfinance pandas
 python iv_surface.py
 ```
 
 ## Technical Stack
 
-Python · NumPy · SciPy (optimize, stats) · yfinance · matplotlib
+Python · NumPy · SciPy (optimize, stats) · pandas · yfinance · matplotlib
 
 ## References
 
-- Gatheral, J. (2004). *A parsimonious arbitrage-free implied volatility parameterization with application to the valuation of volatility derivatives.* Presentation at Global Derivatives.
+- Gatheral, J. (2004). *A parsimonious arbitrage-free implied volatility parameterization.* Global Derivatives.
 - Gatheral, J., & Jacquier, A. (2014). *Arbitrage-free SVI volatility surfaces.* Quantitative Finance, 14(1), 59-71.
