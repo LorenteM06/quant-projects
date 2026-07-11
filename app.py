@@ -36,11 +36,9 @@ def rho_call(S, K, T, r, sigma):
     d2 = d1 - sigma*np.sqrt(T)
     return K * T * np.exp(-r*T) * norm.cdf(d2) / 100
 
-# ── TÍTULO ──
 st.title("Black-Scholes Options Pricer")
 st.markdown("Interactive options pricing model with Greeks, Monte Carlo simulation and real market data.")
 
-# ── SLIDERS ──
 st.sidebar.header("Parameters")
 S = st.sidebar.slider("Stock Price (S)", 50, 500, 100)
 K = st.sidebar.slider("Strike Price (K)", 50, 500, 100)
@@ -51,13 +49,11 @@ sigma = st.sidebar.slider("Volatility", 0.05, 0.8, 0.2)
 call = bs_call(S, K, T, r, sigma)
 put  = bs_put(S, K, T, r, sigma)
 
-# ── PRECIOS ──
 st.subheader("Option Prices")
 col1, col2 = st.columns(2)
 col1.metric("Call Price", f"${call:.4f}")
 col2.metric("Put Price",  f"${put:.4f}")
 
-# ── GREEKS ──
 st.subheader("Greeks")
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Delta", f"{delta_call(S, K, T, r, sigma):.4f}")
@@ -66,7 +62,6 @@ col3.metric("Vega",  f"{vega(S, K, T, r, sigma):.4f}")
 col4.metric("Theta", f"{theta_call(S, K, T, r, sigma):.4f}")
 col5.metric("Rho",   f"{rho_call(S, K, T, r, sigma):.4f}")
 
-# ── PUT-CALL PARITY ──
 st.subheader("Put-Call Parity Verification")
 left  = call - put
 right = S - K * np.exp(-r * T)
@@ -78,7 +73,6 @@ if abs(left - right) < 0.01:
 else:
     st.error("✗ Put-call parity violated")
 
-# ── GRÁFICOS ──
 S_range = np.linspace(50, 500, 200)
 
 st.subheader("Delta vs Stock Price")
@@ -115,7 +109,6 @@ ax3.legend()
 ax3.grid(alpha=0.3)
 st.pyplot(fig3)
 
-# ── MONTE CARLO ──
 st.subheader("Monte Carlo vs Black-Scholes")
 n_sims = st.slider("Number of simulations", 100, 50000, 10000, step=100)
 Z  = np.random.standard_normal(n_sims)
@@ -142,42 +135,3 @@ ax4.set_xscale('log')
 ax4.legend()
 ax4.grid(alpha=0.3)
 st.pyplot(fig4)
-
-# ── REAL MARKET DATA ──
-st.subheader("Real Market Data")
-ticker = st.text_input("Enter stock ticker (e.g. AAPL, MSFT, TSLA)", value="AAPL")
-
-if ticker:
-    try:
-        stock = yf.Ticker(ticker)
-        current_price = stock.history(period="1d")['Close'].iloc[-1]
-        st.metric(f"{ticker} Current Price", f"${current_price:.2f}")
-
-        K_real = st.number_input(
-            "Strike Price (K)",
-            min_value=1.0,
-            max_value=float(current_price * 2),
-            value=float(round(current_price))
-        )
-
-        call_real = bs_call(current_price, K_real, T, r, sigma)
-        put_real  = bs_put(current_price, K_real, T, r, sigma)
-
-        col1, col2 = st.columns(2)
-        col1.metric("Theoretical Call Price", f"${call_real:.4f}")
-        col2.metric("Theoretical Put Price",  f"${put_real:.4f}")
-
-        st.subheader("Market vs Model Comparison")
-        options = stock.option_chain(stock.options[0])
-        calls_market = options.calls[['strike', 'lastPrice', 'impliedVolatility']].copy()
-        calls_market.columns = ['Strike', 'Market Price', 'Impl. Vol']
-        calls_market['Model Price'] = calls_market['Strike'].apply(
-            lambda k: round(bs_call(current_price, k, T, r, sigma), 4)
-        )
-        calls_market['Difference'] = (calls_market['Market Price'] - calls_market['Model Price']).round(4)
-        st.dataframe(calls_market.reset_index(drop=True))
-
-        st.caption(f"Expiry: {stock.options[0]} · Live {ticker} price: ${current_price:.2f}")
-
-    except Exception as e:
-        st.error(f"Error loading {ticker}: {e}")
