@@ -1,39 +1,98 @@
+"""
+Almgren-Chriss Optimal Execution Model
+========================================
+Full implementation and analysis of the Almgren-Chriss (2000) framework for
+optimal trade execution, extended with cross-asset comparison, historical
+backtesting on live market data, and intraday sensitivity analysis.
+"""
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import yfinance as yf
 
 # ══════════════════════════════════════════
-# 1. PARÁMETROS INICIALES (escenario sintético)
+# 1. INITIAL PARAMETERS (synthetic scenario)
 # ══════════════════════════════════════════
+# Reference scenario used for the theoretical sections (sensitivity to lambda,
+# efficient frontier). Real-asset parameters are estimated later per ticker.
 
-X0 = 100_000       # Acciones a vender
-T = 5              # Horizonte total (horas)
-N = 50             # Número de intervalos
-sigma = 0.5        # Volatilidad ($/√hora)
-gamma = 2.5e-7     # Impacto permanente
-eta = 2.5e-6       # Impacto temporal
+X0 = 100_000       # Shares to liquidate
+T = 5              # Total horizon (hours)
+N = 50             # Number of trading intervals
+sigma = 0.5        # Price volatility ($/sqrt(hour))
+gamma = 2.5e-7     # Permanent impact coefficient
+eta = 2.5e-6       # Temporary impact coefficient
 
 print(f"Selling {X0} shares over {T} hours in {N} intervals")
 print(f"Interval size: {T/N} hours = {T/N * 60:.1f} minutes each")
 
+
 # ══════════════════════════════════════════
-# 2. FUNCIONES BASE
+# 2. CORE FUNCTIONS
 # ══════════════════════════════════════════
 
 def ac_holdings(kappa, X0, T, times):
-    """Trayectoria Almgren-Chriss numéricamente estable."""
+    """
+    Compute the Almgren-Chriss optimal holdings trajectory.
+
+    The analytical solution is x(t) = X0 * sinh(k*(T-t)) / sinh(k*T),
+    reformulated with exponentials to remain numerically stable at large k*T.
+
+    Parameters
+    ----------
+    kappa : float
+        Trading urgency parameter, k = sqrt(lambda * sigma^2 / eta).
+    X0 : float
+        Initial position (shares to sell).
+    T : float
+        Total execution horizon.
+    times : ndarray
+        Grid of evaluation times.
+
+    Returns
+    -------
+    ndarray
+        Shares remaining at each time in `times`.
+    """
     tau = T - times
     if kappa * T > 500:
+        # Immediate liquidation regime: numerical guard for extreme urgency
         result = np.zeros_like(times)
-        result[times < T/len(times)] = X0
+        result[times < T / len(times)] = X0
         return result
     return X0 * (np.exp(kappa * tau - kappa * T) - np.exp(-kappa * tau - kappa * T)) / \
                 (1 - np.exp(-2 * kappa * T))
 
+
 def strategy_stats(kappa, X0, T, sigma, eta, N):
-    """Coste esperado y varianza de la estrategia."""
-    times = np.linspace(0, T, N+1)
+    """
+    Compute expected cost and cost variance of an Almgren-Chriss strategy.
+
+    Expected cost captures temporary impact incurred during execution.
+    Variance captures market risk from holding open exposure over time.
+
+    Parameters
+    ----------
+    kappa : float
+        Trading urgency parameter.
+    X0 : float
+        Initial position.
+    T : float
+        Execution horizon.
+    sigma : float
+        Volatility.
+    eta : float
+        Temporary impact coefficient.
+    N : int
+        Number of intervals.
+
+    Returns
+    -------
+    tuple of float
+        (expected_cost, variance).
+    """
+    times = np.linspace(0, T, N + 1)
     dt = T / N
     x = ac_holdings(kappa, X0, T, times)
     trades = -np.diff(x)
@@ -42,8 +101,28 @@ def strategy_stats(kappa, X0, T, sigma, eta, N):
     variance = sigma**2 * np.sum(x[1:]**2) * dt
     return expected_cost, variance
 
+
 def estimate_params(ticker_symbol, period="6mo"):
-    """Estima sigma, eta, gamma para un ticker."""
+    """
+    Estimate Almgren-Chriss parameters from live market data.
+
+    Volatility is derived from historical log-returns and rescaled to hourly.
+    Temporary impact is approximated by eta = spread / (2 * hourly volume),
+    a standard heuristic in the market microstructure literature. Permanent
+    impact gamma is set to eta/10 as a conventional first approximation.
+
+    Parameters
+    ----------
+    ticker_symbol : str
+        Ticker to fetch from Yahoo Finance.
+    period : str
+        History period (e.g. '6mo', '1y').
+
+    Returns
+    -------
+    dict
+        Estimated model parameters and reference statistics.
+    """
     tk = yf.Ticker(ticker_symbol)
     hist = tk.history(period=period)
     daily_returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
@@ -52,6 +131,7 @@ def estimate_params(ticker_symbol, period="6mo"):
     sigma_price = sigma_daily * price
     sigma_hourly = sigma_price / np.sqrt(6.5)
     avg_volume = hist['Volume'].mean()
+    # Rough spread proxy: liquid ETFs quote in cents, small caps in nickels
     spread = 0.01 if avg_volume > 10e6 else 0.05
     eta = spread / (2 * avg_volume / 6.5)
     gamma = eta / 10
@@ -64,13 +144,14 @@ def estimate_params(ticker_symbol, period="6mo"):
         'gamma': gamma
     }
 
+
 # ══════════════════════════════════════════
 # 3. SENSITIVITY TO LAMBDA
 # ══════════════════════════════════════════
+# Show how the optimal trajectory changes as risk aversion lambda varies.
+# Low lambda -> TWAP-like (flat). High lambda -> aggressive front-loading.
 
-times = np.linspace(0, T, N+1)
-
-# TWAP como referencia
+times = np.linspace(0, T, N + 1)
 twap_holdings_ref = X0 - np.cumsum(np.full(N, X0 / N))
 
 lambdas = [1e-8, 1e-6, 1e-4, 1e-2]
@@ -92,9 +173,13 @@ plt.tight_layout()
 plt.savefig('lambda_sensitivity.png', dpi=150)
 plt.show()
 
+
 # ══════════════════════════════════════════
 # 4. EFFICIENT FRONTIER
 # ══════════════════════════════════════════
+# For each lambda, compute (E[cost], Var[cost]) and plot the locus of
+# reachable optimal points. Every point below this curve is achievable by
+# some strategy; every point above is impossible.
 
 lambdas_range = np.logspace(-10, -2, 100)
 costs = []
@@ -112,6 +197,7 @@ variances = np.array(variances)
 plt.figure(figsize=(10, 6))
 plt.plot(variances, costs, '-', color='seagreen', linewidth=2, label='Efficient frontier')
 
+# Highlight a few reference points
 for lam in [1e-8, 1e-6, 1e-4]:
     k = np.sqrt(lam * sigma**2 / eta)
     c, v = strategy_stats(k, X0, T, sigma, eta, N)
@@ -128,15 +214,18 @@ plt.tight_layout()
 plt.savefig('efficient_frontier.png', dpi=150)
 plt.show()
 
+
 # ══════════════════════════════════════════
 # 5. INSTITUTIONAL BENCHMARKS (TWAP vs VWAP vs AC)
 # ══════════════════════════════════════════
+# Compare the theoretical solution against the two industry-standard
+# schedules used by institutional execution desks.
 
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("INSTITUTIONAL BENCHMARKS: TWAP vs VWAP vs Almgren-Chriss")
-print("="*60)
+print("=" * 60)
 
-# Patrón de volumen intradía histórico
+# Empirical intraday volume pattern (used to build VWAP)
 spy_intra_vwap = yf.Ticker("SPY").history(period="30d", interval="15m").reset_index()
 spy_intra_vwap['hour'] = spy_intra_vwap['Datetime'].dt.hour + spy_intra_vwap['Datetime'].dt.minute / 60
 volume_pattern = spy_intra_vwap.groupby('hour')['Volume'].mean()
@@ -145,13 +234,13 @@ volume_weights = volume_pattern / volume_pattern.sum()
 N_vwap = len(volume_weights)
 vwap_trades = X0 * volume_weights.values
 vwap_holdings = X0 - np.cumsum(vwap_trades)
-times_vwap = np.linspace(0, T, N_vwap+1)
+times_vwap = np.linspace(0, T, N_vwap + 1)
 
 lam_vwap = 1e-6
 spy_p = estimate_params("SPY")
 k_vwap = np.sqrt(lam_vwap * spy_p['sigma_hourly']**2 / spy_p['eta'])
 ac_holdings_ref = ac_holdings(k_vwap, X0, T, times_vwap[1:])
-twap_holdings_ref2 = X0 - np.cumsum(np.full(N_vwap, X0/N_vwap))
+twap_holdings_ref2 = X0 - np.cumsum(np.full(N_vwap, X0 / N_vwap))
 
 plt.figure(figsize=(11, 6))
 plt.plot(times_vwap[1:], vwap_holdings, 'o-', color='darkorange', label='VWAP', linewidth=2)
@@ -167,7 +256,14 @@ plt.tight_layout()
 plt.savefig('vwap_comparison.png', dpi=150)
 plt.show()
 
+
 def cost_of_schedule(trades, sigma, eta, T, N, X0):
+    """
+    Compute expected cost and variance of a fixed trading schedule.
+
+    Generic helper used to evaluate arbitrary schedules (TWAP, VWAP, or the
+    discretised AC solution) under the same cost model.
+    """
     dt = T / N
     velocities = trades / dt
     x = X0 - np.cumsum(trades)
@@ -175,7 +271,8 @@ def cost_of_schedule(trades, sigma, eta, T, N, X0):
     var = sigma**2 * np.sum(x**2) * dt
     return cost, var
 
-twap_c, twap_v = cost_of_schedule(np.full(N_vwap, X0/N_vwap), spy_p['sigma_hourly'], spy_p['eta'], T, N_vwap, X0)
+
+twap_c, twap_v = cost_of_schedule(np.full(N_vwap, X0 / N_vwap), spy_p['sigma_hourly'], spy_p['eta'], T, N_vwap, X0)
 vwap_c, vwap_v = cost_of_schedule(vwap_trades, spy_p['sigma_hourly'], spy_p['eta'], T, N_vwap, X0)
 ac_trades = -np.diff(np.concatenate([[X0], ac_holdings_ref]))
 ac_c, ac_v = cost_of_schedule(ac_trades, spy_p['sigma_hourly'], spy_p['eta'], T, N_vwap, X0)
@@ -187,13 +284,16 @@ print(f"{'TWAP':<10} ${twap_c:<12.4f}  ${np.sqrt(twap_v):<12.2f}")
 print(f"{'VWAP':<10} ${vwap_c:<12.4f}  ${np.sqrt(vwap_v):<12.2f}")
 print(f"{'AC':<10} ${ac_c:<12.4f}  ${np.sqrt(ac_v):<12.2f}")
 
+
 # ══════════════════════════════════════════
 # 6. CROSS-ASSET TRADING URGENCY
 # ══════════════════════════════════════════
+# Study how the optimal schedule and critical risk aversion vary across
+# assets of different liquidity: two ETFs, one large-cap, one small-cap.
 
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("CROSS-ASSET TRADING URGENCY")
-print("="*60)
+print("=" * 60)
 
 tickers = ["SPY", "QQQ", "NVDA", "RIVN"]
 assets = [estimate_params(t) for t in tickers]
@@ -204,14 +304,14 @@ for a in assets:
     print(f"{a['ticker']:<8} ${a['price']:<10.2f} ${a['sigma_hourly']:<8.4f} "
           f"{a['avg_volume']/1e6:<10.1f} {a['eta']:<10.2e}")
 
-# Trayectorias óptimas (0.5% ADV, lambda fijo)
 T_cross = 5
 N_cross = 30
-times_cross = np.linspace(0, T_cross, N_cross+1)
+times_cross = np.linspace(0, T_cross, N_cross + 1)
 lam_cross = 1e-6
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
+# Left panel: normalised trajectories (order = 0.5% of ADV per asset)
 for a in assets:
     X0_cross = int(0.005 * a['avg_volume'])
     k = np.sqrt(lam_cross * a['sigma_hourly']**2 / a['eta'])
@@ -225,8 +325,14 @@ axes[0].set_title(f'Optimal trajectories (λ={lam_cross:.0e}, order = 0.5% ADV)'
 axes[0].legend()
 axes[0].grid(alpha=0.3)
 
-# Half-completion time vs lambda (urgencia)
+
 def half_completion_time(kappa, T):
+    """
+    Return the fraction of horizon needed to liquidate half the position.
+
+    A value of 0.5 means TWAP-like (linear decay). Values below 0.5 indicate
+    aggressive front-loading; values above 0.5 indicate back-loading.
+    """
     if kappa * T < 1e-6:
         return 0.5
     times_fine = np.linspace(0, T, 1000)
@@ -234,8 +340,9 @@ def half_completion_time(kappa, T):
     idx = np.argmin(np.abs(holdings - 0.5))
     return times_fine[idx] / T
 
-lambdas_urg = np.logspace(-14, -4, 40)
 
+# Right panel: how urgency scales with lambda across assets
+lambdas_urg = np.logspace(-14, -4, 40)
 for a in assets:
     hcs = []
     for lam in lambdas_urg:
@@ -255,6 +362,7 @@ plt.tight_layout()
 plt.savefig('cross_asset.png', dpi=150)
 plt.show()
 
+# Report the critical lambda at which each asset moves away from TWAP
 print(f"\nCritical urgency (order = 1% ADV, T={T_cross}h):")
 print(f"{'Ticker':<8} {'λ critical':<15}")
 print("-" * 30)
@@ -267,13 +375,17 @@ for a in assets:
             print(f"{a['ticker']:<8} {lam:.1e}")
             break
 
+
 # ══════════════════════════════════════════
 # 7. HISTORICAL BACKTEST
 # ══════════════════════════════════════════
+# Simulate both TWAP and AC schedules on 100 random 5-hour windows of live
+# SPY 15-min data. Compares the realised cost distributions to test whether
+# the model's variance-reduction claim holds empirically.
 
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("HISTORICAL BACKTEST: SPY execution over 30 days")
-print("="*60)
+print("=" * 60)
 
 spy_intraday = yf.Ticker("SPY").history(period="30d", interval="15m")
 print(f"Loaded {len(spy_intraday)} 15-min bars")
@@ -284,7 +396,7 @@ N_bt = 20
 lam_bt = 1e-9
 
 k_bt = np.sqrt(lam_bt * spy_p['sigma_hourly']**2 / spy_p['eta'])
-times_bt = np.linspace(0, T_bt, N_bt+1)
+times_bt = np.linspace(0, T_bt, N_bt + 1)
 holdings_bt = ac_holdings(k_bt, X0_bt, T_bt, times_bt)
 trades_bt = -np.diff(holdings_bt)
 trades_twap = np.full(N_bt, X0_bt / N_bt)
@@ -297,10 +409,11 @@ twap_costs = []
 
 for _ in range(n_simulations):
     start_idx = np.random.randint(0, len(spy_intraday) - N_bt)
-    window_prices = spy_intraday['Close'].iloc[start_idx:start_idx+N_bt].values
+    window_prices = spy_intraday['Close'].iloc[start_idx:start_idx + N_bt].values
     if len(window_prices) < N_bt:
         continue
     ref_price = window_prices[0]
+    # Cost = shortfall vs reference price at each execution point
     ac_cost_sim = np.sum(trades_bt * (ref_price - window_prices))
     twap_cost_sim = np.sum(trades_twap * (ref_price - window_prices))
     ac_costs.append(ac_cost_sim)
@@ -328,13 +441,16 @@ plt.tight_layout()
 plt.savefig('backtest_distribution.png', dpi=150)
 plt.show()
 
+
 # ══════════════════════════════════════════
 # 8. INTRADAY EXECUTION ANALYSIS
 # ══════════════════════════════════════════
+# Re-estimate model parameters within each 30-min bin of the trading day
+# and quantify how expected execution cost varies with the time of day.
 
-print("\n" + "="*60)
+print("\n" + "=" * 60)
 print("INTRADAY EXECUTION: cost vs time of day")
-print("="*60)
+print("=" * 60)
 
 spy_hd = yf.Ticker("SPY").history(period="60d", interval="15m").reset_index()
 spy_hd['hour'] = spy_hd['Datetime'].dt.hour + spy_hd['Datetime'].dt.minute / 60
@@ -351,6 +467,7 @@ intraday_stats = spy_hd.groupby('bin', observed=True).agg(
 
 intraday_stats['sigma_per_bin'] = intraday_stats['volatility'] * intraday_stats['avg_price']
 intraday_stats['spread'] = 0.01
+# Factor 4 accounts for four 15-min bins per hour when converting volume
 intraday_stats['eta_bin'] = intraday_stats['spread'] / (2 * intraday_stats['avg_volume'] * 4)
 
 X0_intra = 100_000
@@ -375,7 +492,7 @@ ax1.set_ylabel('Expected execution cost ($)')
 ax1.set_title(f'Cost of executing {X0_intra:,} SPY shares by time of day')
 ax1.grid(alpha=0.3, axis='y')
 
-ax2.plot(intraday_stats['bin'].astype(float), intraday_stats['avg_volume']/1e6, 'o-', color='seagreen', label='Volume', linewidth=2)
+ax2.plot(intraday_stats['bin'].astype(float), intraday_stats['avg_volume'] / 1e6, 'o-', color='seagreen', label='Volume', linewidth=2)
 ax2.set_xlabel('Time of day')
 ax2.set_ylabel('Avg volume per 15-min bin (M shares)', color='seagreen')
 ax2.tick_params(axis='y', labelcolor='seagreen')
